@@ -4,6 +4,9 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64MultiArray
+from armybot_msgs.msg import RobotCommand
+from armybot_msgs.msg import VehicleControl
+from armybot_msgs.msg import CameraAngle
 import math
 
 
@@ -11,45 +14,44 @@ class AckermannTwistController(Node):
     def __init__(self):
         super().__init__('ackermann_twist_controller')
         
-        # Robot parameters 
+        # UGV parameters 
         self.wheelbase = 0.9  # Distance between front and rear axles
         self.track_width = 0.67  # Distance between left and right wheels
         self.wheel_radius = 0.175  # Wheel radius in meters
         self.max_steering_angle = 0.2616  # 15 degrees in radians (from URDF)
         
-        # Internal state variables for bicycle kinematic model
+        # Parameters for bicycle kinematic model
         self.current_steering_angle = 0.0  # Current actual steering angle
         self.target_steering_angle = 0.0   # Target steering angle from kinematics
-        self.steering_rate = 2.0  # Rate of steering change (rad/s) - increased for responsiveness
+        self.steering_rate = 2.0  # Rate of steering change (rad/s)
         
         # Timer for continuous steering updates
-        self.timer_period = 0.02  # 50 Hz update rate for smoother kinematic control
+        self.timer_period = 0.02  # 50 Hz update rate for smoother robot motion
         self.timer = self.create_timer(self.timer_period, self.update_steering)
         
-        # Current command velocities
+        # Current state of robot
         self.current_linear_vel = 0.0
         self.current_angular_vel = 0.0
         self.last_cmd_time = self.get_clock().now()
         
-        # Timeout settings
+        # Timeout parameters
         self.cmd_timeout = 2.0  # 2 seconds timeout to reset steering to center
-        self.steering_reset_rate = 0.5  # Rate to return steering to center (rad/s)
-        self.is_resetting_steering = False  # Flag to track if we're auto-resetting
+        self.steering_reset_rate = 0.5  # Rate of return (rad/s)
+        self.is_resetting_steering = False  # Flag to track if robot steering is resetting
         
-        # Publishers for wheel velocities and steering angles
-        self.wheel_vel_pub = self.create_publisher(
-            Float64MultiArray, 
-            '/forward_velocity_controller/commands', 
-            10
-        )
+
+        # self.wheel_vel_pub = self.create_publisher(
+        #     Float64MultiArray, 
+        #     '/forward_velocity_controller/commands', 
+        #     10
+        # )
+        self.wheel_data_pub = self.create_publisher(RobotCommand,'/robot/cmd',10)
+        # self.steering_pub = self.create_publisher(
+        #     Float64MultiArray,
+        #     '/forward_position_controller/commands',
+        #     10
+        # )
         
-        self.steering_pub = self.create_publisher(
-            Float64MultiArray,
-            '/forward_position_controller/commands',
-            10
-        )
-        
-        # Subscriber to cmd_vel
         self.cmd_vel_sub = self.create_subscription(
             Twist,
             '/cmd_vel',
@@ -60,11 +62,8 @@ class AckermannTwistController(Node):
         self.get_logger().info('Ackermann Twist Controller started with enhanced steering control')
         
     def cmd_vel_callback(self, msg):
-        # NOTE: Robot is oriented with front pointing in +Y direction
-        # We now have a proper coordinate transform in URDF (base_link_corrected)
-        # that aligns robot's +Y with ROS convention +X, so no sign change needed
-        linear_vel = msg.linear.x  # Forward velocity from standard cmd_vel
-        angular_vel = -msg.angular.z  # Angular velocity (rad/s)
+        linear_vel = msg.linear.x  # Forward velocity (m/s)
+        angular_vel = msg.angular.z  # Angular velocity (rad/s)
         
         # Appling Bicycle Kinematic Model for Twist to Ackermann Conversion
         steering_angle = self.twist_to_ackermann_kinematics(linear_vel, angular_vel)
@@ -84,8 +83,8 @@ class AckermannTwistController(Node):
             turning_radius = linear_vel / angular_vel
         else:   
             turning_radius = math.inf #Infinite for straight line motion
-        self.get_logger().info(
-            f'CMD: linear={msg.linear.x:.2f} -> corrected={linear_vel:.2f}, angular={angular_vel:.2f} -> steering={math.degrees(steering_angle):.1f}°'
+        self.get_logger().debug(
+            f'v={linear_vel:.2f}, ω={angular_vel:.2f} -> R={turning_radius:.2f}, δ={math.degrees(steering_angle):.1f} degrees'
         )
     
     def twist_to_ackermann_kinematics(self, linear_vel, angular_vel):
@@ -130,7 +129,7 @@ class AckermannTwistController(Node):
         
         # Checking for command timeout
         if time_diff > self.cmd_timeout:
-            # Timeout exceeded so stopping all the motiona and bringing the robot to default state
+            # Timeout exceeded so stopping all the motions and bringing the robot to default state
             self.current_linear_vel = 0.0
             self.current_angular_vel = 0.0
             self.target_steering_angle = 0.0
@@ -138,7 +137,7 @@ class AckermannTwistController(Node):
             
             # Returning steering to center position
             if abs(self.current_steering_angle) > 0.001:
-                # Calculate direction to move toward center
+                # Calculating direction 
                 if self.current_steering_angle > 0:
                     reset_direction = -1.0
                 else:
@@ -155,7 +154,7 @@ class AckermannTwistController(Node):
             else:
                 self.is_resetting_steering = False
         else:
-            # No timeout - update steering to match kinematic target
+            # No timeout 
             self.is_resetting_steering = False
             
             # Smoothly move current steering toward kinematic target
@@ -172,25 +171,41 @@ class AckermannTwistController(Node):
                                                 min(self.max_steering_angle, self.current_steering_angle))
         
         # Calculating wheel velocities based on current linear velocity and steering
-        left_wheel_vel, right_wheel_vel = self.calculate_wheel_velocities(
-            self.current_linear_vel, self.current_steering_angle
-        )
+        # left_wheel_vel, right_wheel_vel = self.calculate_wheel_velocities(
+        #     self.current_linear_vel, self.current_steering_angle
+        # )
         
         # Calculating individual steering angles
-        left_steering, right_steering = self.calculate_ackermann_angles(self.current_steering_angle)
+        # left_steering, right_steering = self.calculate_ackermann_angles(self.current_steering_angle)
 
         # Publishing motion commands
-        self.publish_steering_commands(left_steering, right_steering)
-        self.publish_wheel_velocities(left_wheel_vel, right_wheel_vel)
+        # self.publish_steering_commands(left_steering, right_steering)
+        # self.publish_wheel_velocities(left_wheel_vel, right_wheel_vel)
+
+        self.publish_wheel_commands()
         
         # Debug logging
-        self.get_logger().debug(
-            f'{"TIMEOUT" if self.is_resetting_steering else "KINEMATICS"}: '
-            f'Target: {math.degrees(self.target_steering_angle):.1f}, '
-            f'Current: {math.degrees(self.current_steering_angle):.1f}, '
-            f'Wheels: L={left_wheel_vel:.2f}, R={right_wheel_vel:.2f}'
-        )
+        # self.get_logger().debug(
+        #     f'{"TIMEOUT" if self.is_resetting_steering else "KINEMATICS"}: '
+        #     f'Target: {math.degrees(self.target_steering_angle):.1f}, '
+        #     f'Current: {math.degrees(self.current_steering_angle):.1f}, '
+        #     f'Wheels: L={left_wheel_vel:.2f}, R={right_wheel_vel:.2f}'
+        # )
     
+    def publish_wheel_commands(self):
+        cmd=RobotCommand()
+        wheel=VehicleControl()
+        wheel.linear_velocity=self.current_linear_vel*60
+        wheel.steering_angle=self.current_steering_angle*540/math.pi
+        camera=CameraAngle()
+        camera.azimuth=self.current_steering_angle*540/math.pi
+        camera.elevation=0.0
+        cmd.vehicle_control=wheel
+        cmd.camera_angle=camera
+        self.wheel_data_pub.publish(cmd)
+
+
+
     def calculate_wheel_velocities(self, linear_vel, steering_angle):
         """
         Calculating wheel velocities using bicycle kinematic model.
@@ -280,13 +295,8 @@ class AckermannTwistController(Node):
     
     def publish_wheel_velocities(self, left_vel, right_vel):
         velocity_msg = Float64MultiArray()
-        # Note: If robot still moves backward, uncomment the next line to reverse wheel directions
-        # left_vel, right_vel = -left_vel, -right_vel  # UNCOMMENT if needed
         velocity_msg.data = [left_vel, right_vel]
         self.wheel_vel_pub.publish(velocity_msg)
-        
-        # Debug log to help with troubleshooting
-        self.get_logger().debug(f'Publishing wheel velocities: left={left_vel:.2f}, right={right_vel:.2f}')
 
 
 def main(args=None):
