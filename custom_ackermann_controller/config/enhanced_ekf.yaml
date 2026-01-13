@@ -66,11 +66,11 @@ ekf_filter_node:
     # Sensor configurations
     # Format: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, ayaw]
     
-    # Enhanced wheel odometry (primary velocity source)
-    odom0: /wheel_odometry/odom
-    odom0_config: [false, false, false,    # Position (not used - drift accumulation)
-                   false, false, false,    # Orientation (not used - no heading from wheels)
-                   true,  true,  false,    # Velocity (primary measurement)
+    # Corrected wheel odometry (speed from encoders + direction from scan matching)
+    odom0: /wheel_odometry/odom_corrected
+    odom0_config: [false, false, false,    # Position (not used)
+                   false, false, false,    # Orientation (not used)
+                   true,  false,  false,   # Velocity (vx only - magnitude from encoders, direction from scan matching)
                    false, false, false,    # Angular velocity (not from wheels)
                    false, false, false]    # Acceleration (not measured)
     odom0_queue_size: 5
@@ -80,12 +80,13 @@ ekf_filter_node:
     odom0_pose_rejection_threshold: 5.0      # Reject large pose jumps
     odom0_twist_rejection_threshold: 1.0     # Reject large velocity jumps
     
-    # Adaptive scan matching odometry (position and orientation source)
+    # Adaptive scan matching odometry (position and orientation source only)
+    # Velocity direction is already used in corrected wheel odometry
     odom1: /scan_matching_odometry/odom
     odom1_config: [true,  true,  false,     # Position (primary source)
                    false, false, true,      # Orientation (yaw only)
-                   false, false, false,     # Velocity (not reliable from scan matching)
-                   false, false, false,     # Angular velocity (not from scan matching)
+                   false, false, false,     # Velocity (used only for direction correction)
+                   false, false, true,      # Angular velocity (yaw rate)
                    false, false, false]     # Acceleration (not measured)
     odom1_queue_size: 5
     odom1_nodelay: false
@@ -94,12 +95,13 @@ ekf_filter_node:
     odom1_pose_rejection_threshold: 2.0      # More sensitive to scan matching jumps
     odom1_twist_rejection_threshold: 0.5
     
-    # Enhanced IMU data (orientation and angular velocity)
+    # Enhanced IMU data (angular velocity only - no magnetometer)
+    # Using scan matching for yaw orientation instead of noisy magnetometer
     imu0: /imu/data_corrected
     imu0_config: [false, false, false,      # Position (not measured)
-                  false, false, true,       # Orientation (yaw only, if magnetometer available)
+                  false, false, false,      # Orientation (disabled - using scan matching instead)
                   false, false, false,      # Velocity (not directly measured)
-                  false, false, true,       # Angular velocity (yaw rate)
+                  false, false, true,       # Angular velocity (yaw rate from gyro - reliable)
                   false, false, false]      # Acceleration (can be enabled if needed)
     imu0_queue_size: 5
     imu0_nodelay: false

@@ -29,7 +29,6 @@ class AdaptiveScanMatcherNode(Node):
         self.declare_parameter('downsample_factor', 2)
         self.declare_parameter('min_feature_threshold', 10)
         self.declare_parameter('quality_threshold', 0.3)
-        self.declare_parameter('fallback_to_wheel_odom', True)
         
         # Get parameters
         self.base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
@@ -45,14 +44,16 @@ class AdaptiveScanMatcherNode(Node):
         self.downsample_factor = self.get_parameter('downsample_factor').get_parameter_value().integer_value
         self.min_feature_threshold = self.get_parameter('min_feature_threshold').get_parameter_value().integer_value
         self.quality_threshold = self.get_parameter('quality_threshold').get_parameter_value().double_value
-        self.fallback_to_wheel_odom = self.get_parameter('fallback_to_wheel_odom').get_parameter_value().bool_value
         
         # State variables
         self.last_scan = None
         self.last_pose = None
+        self.last_time = None
         self.scan_matching_quality = 0.0
         self.feature_count = 0
         self.matching_confidence = 1.0
+        self.linear_velocity = 0.0  # vx
+        self.angular_velocity = 0.0  # vtheta
         
         # Publishers
         self.odom_pub = self.create_publisher(Odometry, '/scan_matching_odometry/odom', 10)
@@ -61,7 +62,6 @@ class AdaptiveScanMatcherNode(Node):
         
         # Subscribers
         self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
-        self.wheel_odom_sub = self.create_subscription(Odometry, '/wheel_odometry/odom', self.wheel_odom_callback, 10)
         
         # TF
         self.tf_buffer = tf2_ros.Buffer()
@@ -293,8 +293,7 @@ class AdaptiveScanMatcherNode(Node):
         # Determine matching confidence based on quality
         if quality < (self.quality_threshold or 0.3) or feature_count < (self.min_feature_threshold or 10):
             self.matching_confidence = 0.1  # Low confidence
-            if self.fallback_to_wheel_odom:
-                self.get_logger().debug('Low scan quality, reducing scan matching confidence')
+            self.get_logger().debug('Low scan quality, reducing scan matching confidence')
         else:
             self.matching_confidence = min(1.0, quality * 2.0)
         
@@ -303,42 +302,67 @@ class AdaptiveScanMatcherNode(Node):
         confidence_msg.data = self.matching_confidence
         self.confidence_pub.publish(confidence_msg)
         
+        # Get current time
+        current_time = scan_msg.header.stamp.sec + scan_msg.header.stamp.nanosec * 1e-9
+        
         # Perform scan matching if we have a previous scan
-        if self.last_scan is not None and self.last_pose is not None:
-            # Simple motion prediction as initial guess
-            initial_pose = self.last_pose.copy()
+        if self.last_scan is not None and self.last_pose is not None and self.last_time is not None:
+            # Calculate time difference
+            dt = current_time - self.last_time
             
-            # Perform ICP
-            new_pose, matching_score = self.simple_icp(points, self.last_scan, initial_pose)
-            
-            # Update confidence based on matching score
-            self.matching_confidence *= matching_score
-            
-            # Create and publish odometry message
-            self.publish_scan_odometry(scan_msg.header, new_pose, self.matching_confidence)
-            
-            self.last_pose = new_pose
+            if dt > 0.01:  # At least 10ms between scans
+                # Simple motion prediction as initial guess
+                initial_pose = self.last_pose.copy()
+                
+                # Perform ICP
+                new_pose, matching_score = self.simple_icp(points, self.last_scan, initial_pose)
+                
+                # Calculate velocity from pose change
+                delta_x = new_pose[0] - self.last_pose[0]
+                delta_y = new_pose[1] - self.last_pose[1]
+                delta_theta = new_pose[2] - self.last_pose[2]
+                
+                # Normalize angle to [-pi, pi]
+                while delta_theta > np.pi:
+                    delta_theta -= 2 * np.pi
+                while delta_theta < -np.pi:
+                    delta_theta += 2 * np.pi
+                
+                # Calculate linear velocity (magnitude)
+                self.linear_velocity = np.sqrt(delta_x**2 + delta_y**2) / dt
+                
+                # Determine direction (forward/backward) based on heading
+                movement_angle = np.arctan2(delta_y, delta_x)
+                heading_diff = movement_angle - self.last_pose[2]
+                while heading_diff > np.pi:
+                    heading_diff -= 2 * np.pi
+                while heading_diff < -np.pi:
+                    heading_diff += 2 * np.pi
+                
+                # If moving backward (heading diff > 90 degrees), make velocity negative
+                if abs(heading_diff) > np.pi / 2:
+                    self.linear_velocity = -self.linear_velocity
+                
+                # Calculate angular velocity
+                self.angular_velocity = delta_theta / dt
+                
+                # Update confidence based on matching score
+                self.matching_confidence *= matching_score
+                
+                # Create and publish odometry message
+                self.publish_scan_odometry(scan_msg.header, new_pose, self.matching_confidence)
+                
+                self.last_pose = new_pose
+                self.last_time = current_time
         else:
             # Initialize with identity pose
             self.last_pose = np.array([0.0, 0.0, 0.0])
+            self.last_time = current_time
+            self.linear_velocity = 0.0
+            self.angular_velocity = 0.0
         
         # Store current scan for next iteration
         self.last_scan = points
-
-    def wheel_odom_callback(self, odom_msg):
-        """Fallback odometry from wheel encoders"""
-        if self.matching_confidence < 0.3 and self.fallback_to_wheel_odom:
-            # Re-publish wheel odometry with scan matching topic
-            odom_msg.header.frame_id = self.odom_frame
-            odom_msg.child_frame_id = self.base_frame
-            
-            # Reduce confidence in covariance
-            for i in range(36):
-                if i % 7 == 0 and i < 36:  # Diagonal elements
-                    odom_msg.pose.covariance[i] *= 2.0  # Increase uncertainty
-                    odom_msg.twist.covariance[i] *= 1.5
-            
-            self.odom_pub.publish(odom_msg)
 
     def publish_scan_odometry(self, header, pose, confidence):
         """Publish scan matching odometry"""
@@ -371,9 +395,27 @@ class AdaptiveScanMatcherNode(Node):
             0.0, 0.0, 0.0, 0.0, 0.0, base_orient_var
         ]
         
-        # Velocity is not directly estimated by scan matching
-        # Set high uncertainty for velocity
-        odom_msg.twist.covariance = [1e6] * 36
+        # Set velocity from calculated values
+        odom_msg.twist.twist.linear.x = self.linear_velocity
+        odom_msg.twist.twist.linear.y = 0.0
+        odom_msg.twist.twist.linear.z = 0.0
+        
+        odom_msg.twist.twist.angular.x = 0.0
+        odom_msg.twist.twist.angular.y = 0.0
+        odom_msg.twist.twist.angular.z = self.angular_velocity
+        
+        # Set velocity covariance based on confidence
+        base_vel_var = 0.1 / max(confidence, 0.1)
+        base_ang_vel_var = 0.2 / max(confidence, 0.1)
+        
+        odom_msg.twist.covariance = [
+            base_vel_var, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 1e6, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 1e6, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1e6, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 1e6, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, base_ang_vel_var
+        ]
         
         self.odom_pub.publish(odom_msg)
 
