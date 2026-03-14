@@ -19,6 +19,12 @@ Unlike standard differential drive robots, this UGV utilizes an Ackermann steeri
 
 ## Media
 ### Photos
+
+#### Real Hardware Chassis
+| Chassis View 1 | Chassis View 2 |
+| :---: | :---: |
+| <img width="685" height="555" alt="Chassis View 1" src="[Drag and drop 1.jpeg into GitHub to generate link]" /> | <img width="685" height="555" alt="Chassis View 2" src="[Drag and drop 2.jpeg into GitHub to generate link]" /> |
+
 | UGV Simulation Model | Gazebo Environment |
 | :---: | :---: |
 | <img width="685" height="555" alt="UGV Simulation Model" src="https://github.com/user-attachments/assets/7b9a00cd-80f0-42bd-b205-16933fbccad1" /> | <img width="1083" height="669" alt="Gazebo Environment" src="https://github.com/user-attachments/assets/186d6e5a-5b57-42d7-b229-547964c947ea" /> |
